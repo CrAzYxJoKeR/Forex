@@ -1,0 +1,6 @@
+{
+  "name": "Forex Macro & Risk Desk",
+  "description": "Institutional Forex Macro & Risk Desk for EUR/USD and GBP/USD intraday traders with live pre-market briefings, red folder danger zones, yield bias, and risk modifiers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
