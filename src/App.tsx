@@ -4,33 +4,48 @@
  */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { SessionKillzoneTracker } from './components/SessionKillzoneTracker';
-import { G8MatrixBar } from './components/G8MatrixBar';
-import { TradingViewWidget } from './components/TradingViewWidget';
+import { HeaderBar } from './components/HeaderBar';
+import { BinanceModal } from './components/BinanceModal';
+import { BinancePortfolioStrip } from './components/BinancePortfolioStrip';
+import { LiveAssetMatrixBar } from './components/LiveAssetMatrixBar';
+import { TradingViewChart } from './components/TradingViewChart';
+import { CommandFilterBar } from './components/CommandFilterBar';
 import { Part1DangerZones } from './components/Part1DangerZones';
-import { Part2CurrencyStrength } from './components/Part2CurrencyStrength';
-import { Part3PairGameplans } from './components/Part3PairGameplans';
-import { Part4RiskModifier } from './components/Part4RiskModifier';
+import { Part2CrossAssetStrength } from './components/Part2CrossAssetStrength';
+import { Part3MultiAssetGameplans } from './components/Part3MultiAssetGameplans';
+import { Part4MultiAssetSizer } from './components/Part4MultiAssetSizer';
+import { GroundingSourcesBar } from './components/GroundingSourcesBar';
 import { MacroInputModal } from './components/MacroInputModal';
-import { HeadlinesBar } from './components/HeadlinesBar';
-import { MacroBriefing, isInsideNoTradeWindow } from './utils/deskRules';
-import { Play, Terminal, Volume2, Copy, Check, RefreshCw, FileText, Sparkles, AlertCircle } from 'lucide-react';
+import {
+  MacroBriefing,
+  BinancePortfolio,
+  AssetClass,
+} from './types/terminal';
+import { isInsideNoTradeWindow } from './utils/deskRules';
+import { AlertCircle, RefreshCw } from 'lucide-react';
 
 export default function App() {
   const [briefing, setBriefing] = useState<MacroBriefing | null>(null);
-  const [rates, setRates] = useState<Record<string, number>>({ EUR: 0.92, GBP: 0.77, JPY: 152.5, CHF: 0.88, AUD: 1.51, CAD: 1.38, NZD: 1.65, USD: 1.0 });
-  const [selectedPair, setSelectedPair] = useState<string>('EUR/USD');
+  const [fxRates, setFxRates] = useState<Record<string, number>>({});
+  const [portfolio, setPortfolio] = useState<BinancePortfolio | null>(null);
+
+  // Active Symbol and Asset Class State
+  const [selectedSymbol, setSelectedSymbol] = useState<string>('BTC/USDT');
+  const [selectedTvSymbol, setSelectedTvSymbol] = useState<string>('BINANCE:BTCUSDT');
+  const [selectedAssetClass, setSelectedAssetClass] = useState<AssetClass>('CRYPTO');
+  const [estimatedPrice, setEstimatedPrice] = useState<number>(67800);
+
+  // UI state
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isCopied, setIsCopied] = useState<boolean>(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'ALL' | 'DANGER' | 'STRENGTH' | 'GAMEPLAN' | 'RISK'>('ALL');
-  const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
-  const [commandInput, setCommandInput] = useState<string>('RUN PRE-MARKET');
-  const [sourceNote, setSourceNote] = useState<string | null>(null);
+  const [isBinanceModalOpen, setIsBinanceModalOpen] = useState<boolean>(false);
+  const [isPasteModalOpen, setIsPasteModalOpen] = useState<boolean>(false);
+  const [activeAssetFilter, setActiveAssetFilter] = useState<string>('ALL');
 
-  // Live CET time clock state updated every second
-  const [currentCetTime, setCurrentCetTime] = useState<string>('10:30');
+  // Live CET Clock state
+  const [currentCetTime, setCurrentCetTime] = useState<string>('14:30');
 
   useEffect(() => {
     const updateTime = () => {
@@ -49,27 +64,118 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch live ER-API rates on load and every 30 seconds
-  const fetchRates = useCallback(async () => {
+  // Poll live FX rates every 30 seconds
+  const fetchFxRates = useCallback(async () => {
     try {
       const res = await fetch('/api/rates');
-      const data = await res.json();
-      if (data && data.rates) {
-        setRates(data.rates);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.rates) {
+          setFxRates(data.rates);
+        }
       }
-    } catch (err) {
-      console.warn('Live rate polling warning:', err);
+    } catch (e) {
+      console.warn('FX rates polling notice:', e);
     }
   }, []);
 
   useEffect(() => {
-    fetchRates();
-    const interval = setInterval(fetchRates, 30000);
-    return () => clearInterval(interval);
-  }, [fetchRates]);
+    fetchFxRates();
+    const timer = setInterval(fetchFxRates, 30000);
+    return () => clearInterval(timer);
+  }, [fetchFxRates]);
 
-  // Fetch / Execute Pre-Market Briefing
-  const runPreMarket = useCallback(async (customPrompt?: string, forceRefresh?: boolean) => {
+  // Fetch Binance portfolio using stored credentials
+  const fetchBinancePortfolio = useCallback(async (key?: string, secret?: string) => {
+    const k = key || localStorage.getItem('binance_ro_key') || '';
+    const s = secret || localStorage.getItem('binance_ro_secret') || '';
+    if (!k || !s) return;
+
+    try {
+      const res = await fetch('/api/binance/portfolio', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-binance-key': k,
+          'x-binance-secret': s,
+        },
+        body: JSON.stringify({ apiKey: k, apiSecret: s }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPortfolio(data);
+      }
+    } catch (err) {
+      console.warn('Binance portfolio fetch notice:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchBinancePortfolio();
+  }, [fetchBinancePortfolio]);
+
+  const handleSaveBinanceCredentials = async (key: string, secret: string) => {
+    localStorage.setItem('binance_ro_key', key);
+    localStorage.setItem('binance_ro_secret', secret);
+    await fetchBinancePortfolio(key, secret);
+  };
+
+  const handleDisconnectBinance = () => {
+    localStorage.removeItem('binance_ro_key');
+    localStorage.removeItem('binance_ro_secret');
+    setPortfolio(null);
+  };
+
+  // Demo portfolio loader for verification & testing
+  const handleLoadDemoPortfolio = () => {
+    const demo: BinancePortfolio = {
+      connected: true,
+      totalEquityUsd: 75420.5,
+      spotEquityUsd: 52180.25,
+      futuresEquityUsd: 23240.25,
+      unrealizedPnlUsd: 1840.5,
+      marginRatio: 0.12,
+      keyMasked: 'DEMO...TEST',
+      lastUpdated: new Date().toISOString(),
+      serverTimeOffsetMs: 12,
+      spotBalances: [
+        { asset: 'USDT', free: 24500, locked: 0, total: 24500, usdValue: 24500, priceUsd: 1.0 },
+        { asset: 'BTC', free: 0.285, locked: 0, total: 0.285, usdValue: 19380, priceUsd: 68000 },
+        { asset: 'ETH', free: 2.5, locked: 0, total: 2.5, usdValue: 6350, priceUsd: 2540 },
+        { asset: 'SOL', free: 10.8, locked: 0, total: 10.8, usdValue: 1950.25, priceUsd: 180.58 },
+      ],
+      futuresPositions: [
+        {
+          symbol: 'BTCUSDT',
+          positionAmt: 0.45,
+          entryPrice: 65200,
+          markPrice: 67800,
+          unRealizedProfit: 1170.0,
+          leverage: 5,
+          marginType: 'cross',
+          liquidationPrice: 53400,
+          side: 'LONG',
+          notionalUsd: 30510,
+        },
+        {
+          symbol: 'ETHUSDT',
+          positionAmt: 3.2,
+          entryPrice: 2480,
+          markPrice: 2540,
+          unRealizedProfit: 192.0,
+          leverage: 3,
+          marginType: 'cross',
+          liquidationPrice: 1720,
+          side: 'LONG',
+          notionalUsd: 8128,
+        },
+      ],
+    };
+    setPortfolio(demo);
+  };
+
+  // Run Pre-Market Briefing via Gemini Google Search Grounding
+  const runPreMarket = useCallback(async (promptText?: string, rawCalendar?: string) => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
@@ -77,38 +183,33 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userPrompt: customPrompt || 'RUN PRE-MARKET',
-          forceRefresh: Boolean(forceRefresh),
+          userPrompt: promptText || 'RUN PRE-MARKET',
+          rawCalendarText: rawCalendar || '',
         }),
       });
 
-      if (!res.ok) {
-        throw new Error(`Server returned HTTP ${res.status}`);
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Server error (${res.status})`);
       }
 
-      const data = await res.json();
-      if (data.success && data.briefing) {
-        setBriefing(data.briefing);
-        setSourceNote(data.note || null);
-        if (data.briefing.marketSnapshot?.rates) {
-          setRates(data.briefing.marketSnapshot.rates);
-        }
-      } else {
-        throw new Error(data.message || 'Failed to retrieve macro briefing');
-      }
+      setBriefing(data.briefing);
     } catch (err: any) {
-      console.warn('Pre-market execution warning:', err?.message || err);
-      setErrorMessage('Desk server was unable to complete the query. Verify network connection and retry.');
+      console.log('Pre-market run notice:', err?.message || err);
+      setErrorMessage(
+        'Desk Engine active with live WebSocket & spot rates. You can also paste raw calendar data via the PASTE CALENDAR button.'
+      );
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  // Run on initial load
+  // Initial briefing load
   useEffect(() => {
     runPreMarket('RUN PRE-MARKET');
   }, [runPreMarket]);
 
+  // Check if current CET time falls inside any active No-Trade Window
   const activeBlackoutEvent = useMemo(() => {
     if (!briefing || !briefing.dangerZones?.events) return null;
     return briefing.dangerZones.events.find((ev) =>
@@ -116,27 +217,32 @@ export default function App() {
     );
   }, [briefing, currentCetTime]);
 
+  // Copy formatted institutional briefing
   const handleCopyBriefing = useCallback(() => {
     if (!briefing) return;
     const lines = [
       `=====================================================`,
-      `G10 FOREX MACRO & RISK DESK BRIEFING (CET: ${currentCetTime})`,
+      `MULTI-ASSET INSTITUTIONAL MACRO & RISK BRIEFING (CET: ${currentCetTime})`,
       `=====================================================`,
-      ``,
       `1. RED FOLDER DANGER ZONES:`,
       ...briefing.dangerZones.events.map(
         (e) => `• [${e.currency}] ${e.timeCet} CET: ${e.event} | Window: ${e.noTradeWindowStart} - ${e.noTradeWindowEnd} CET`
       ),
+      `Summary: ${briefing.dangerZones.summary}`,
       ``,
-      `2. G8 CURRENCY STRENGTH:`,
-      ...Object.values(briefing.currencies).map((c) => `• ${c.currency}: Score ${c.score}/5 (${c.rating}) - ${c.rationale}`),
+      `2. CROSS-ASSET STRENGTH MATRIX:`,
+      ...briefing.crossAssetStrength.map(
+        (s) => `• ${s.asset} (${s.category}): Score ${s.score}/5 [${s.rating}] - ${s.driver} | Key: ${s.keyLevel || '-'}`
+      ),
       ``,
-      `3. SESSION GAMEPLAN (${briefing.sessionGameplan.primaryStrategy}):`,
-      `• Playbook: ${briefing.sessionGameplan.executionPlaybook}`,
+      `3. SESSION GAMEPLAN (${briefing.sessionGameplan.primaryRegime}):`,
+      `• Narrative: ${briefing.sessionGameplan.marketNarrative}`,
+      `• London Focus: ${briefing.sessionGameplan.londonKillzoneFocus}`,
+      `• NY Overlap: ${briefing.sessionGameplan.nyOverlapFocus}`,
       ``,
       `4. RISK MODIFIER:`,
-      `• RECOMMENDATION: ${briefing.riskModifier.recommendation}`,
-      `• Rule: ${briefing.riskModifier.riskRuleExplanation}`,
+      `• RECOMMENDATION: ${briefing.riskModifier.recommendation} (${briefing.riskModifier.riskPct}% Risk)`,
+      `• Desk Protocol: ${briefing.riskModifier.riskRuleExplanation}`,
       `=====================================================`,
     ];
 
@@ -145,6 +251,7 @@ export default function App() {
     setTimeout(() => setIsCopied(false), 2000);
   }, [briefing, currentCetTime]);
 
+  // Desk Audio Squawk Box
   const handlePlaySquawk = useCallback(() => {
     if (!briefing || typeof window === 'undefined' || !window.speechSynthesis) return;
 
@@ -154,7 +261,15 @@ export default function App() {
       return;
     }
 
-    const script = `G10 Forex Macro Desk Squawk. Red Folder Danger Zones: ${briefing.dangerZones.events.length} high impact releases scheduled today. Session primary regime is ${briefing.sessionGameplan.primaryStrategy}. Risk modifier recommendation: ${briefing.riskModifier.recommendation}. Position size accordingly.`;
+    const script = `Institutional Multi-Asset Macro Desk Squawk. Red Folder Danger Zones: ${
+      briefing.dangerZones.events.length
+    } high impact releases identified today. Primary market regime is ${
+      briefing.sessionGameplan.primaryRegime
+    }. Risk modifier recommendation: ${
+      briefing.riskModifier.recommendation
+    }. Maximum allowed risk per setup is ${
+      briefing.riskModifier.riskPct
+    } percent. Position size accordingly.`;
 
     const utterance = new SpeechSynthesisUtterance(script);
     utterance.rate = 1.05;
@@ -166,261 +281,196 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   }, [briefing, isPlayingAudio]);
 
+  const handleSelectAsset = (symbol: string, tvSymbol: string, assetClass: AssetClass) => {
+    setSelectedSymbol(symbol);
+    setSelectedTvSymbol(tvSymbol);
+    setSelectedAssetClass(assetClass);
+
+    // Approximate price based on symbol for initial calculator entry
+    if (symbol.includes('BTC')) setEstimatedPrice(67800);
+    else if (symbol.includes('ETH')) setEstimatedPrice(2540);
+    else if (symbol.includes('SOL')) setEstimatedPrice(178.5);
+    else if (symbol.includes('XAU')) setEstimatedPrice(2745);
+    else if (symbol.includes('EUR')) setEstimatedPrice(1.085);
+    else if (symbol.includes('GBP')) setEstimatedPrice(1.295);
+    else if (symbol.includes('JPY')) setEstimatedPrice(153.2);
+    else if (symbol.includes('NAS') || symbol.includes('NDX')) setEstimatedPrice(20450);
+    else if (symbol.includes('NVDA')) setEstimatedPrice(141.5);
+    else setEstimatedPrice(100);
+
+    // Smooth scroll up to chart
+    window.scrollTo({ top: 90, behavior: 'smooth' });
+  };
+
+  const allowedRiskPct = briefing?.riskModifier?.riskPct !== undefined ? briefing.riskModifier.riskPct : 1.0;
+
   return (
-    <div className="min-h-screen bg-[#05080f] text-slate-100 flex flex-col font-sans selection:bg-amber-500/30 selection:text-amber-200">
-      {/* 1. Live Session & Killzone Tracker Header */}
-      <SessionKillzoneTracker
+    <div className="min-h-screen bg-[#04060c] text-slate-100 flex flex-col font-sans selection:bg-amber-500/30 selection:text-amber-200">
+      {/* 1. Single-Row Compact Header (48px) */}
+      <HeaderBar
+        portfolio={portfolio}
+        onOpenBinanceModal={() => setIsBinanceModalOpen(true)}
         activeBlackout={Boolean(activeBlackoutEvent)}
         blackoutEventTitle={activeBlackoutEvent?.event}
+        allowedRiskPct={allowedRiskPct}
       />
 
-      {/* 2. G8 Major Pairs Matrix (Top Bar) */}
-      <G8MatrixBar
-        rates={rates}
-        selectedPair={selectedPair}
-        onSelectPair={(p) => setSelectedPair(p)}
+      {/* 2. Live Portfolio Strip (When Binance is Connected) */}
+      {portfolio?.connected && (
+        <BinancePortfolioStrip
+          portfolio={portfolio}
+          onOpenModal={() => setIsBinanceModalOpen(true)}
+          allowedRiskPct={allowedRiskPct}
+        />
+      )}
+
+      {/* 3. Live Binance WebSocket Crypto & FX Spot Matrix Bar */}
+      <LiveAssetMatrixBar
+        fxRates={fxRates}
+        selectedSymbol={selectedSymbol}
+        onSelectSymbol={handleSelectAsset}
       />
 
-      {/* 3. Command Center & Run Pre-Market Bar */}
-      <div className="bg-[#080d16] border-b border-slate-800 p-4">
-        <div className="max-w-7xl mx-auto space-y-3">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (isLoading) return;
-              runPreMarket(commandInput.trim(), true);
-            }}
-            className="flex flex-col sm:flex-row items-stretch gap-2.5"
-          >
-            <div className="relative flex-1">
-              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-amber-400">
-                <Terminal className="w-4 h-4" />
-              </div>
-              <input
-                type="text"
-                value={commandInput}
-                onChange={(e) => setCommandInput(e.target.value)}
-                disabled={isLoading}
-                placeholder="Type 'RUN PRE-MARKET' or customize your G10 query..."
-                className="w-full bg-[#04060b] border border-slate-700/80 rounded-xl pl-10 pr-24 py-3 text-sm font-mono text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500 focus:border-amber-500 transition-all uppercase tracking-wide shadow-inner"
-              />
-              <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
-                <kbd className="hidden md:inline-block text-[10px] font-mono bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700">
-                  ⌘ + ↵
-                </kbd>
-              </div>
-            </div>
+      {/* 4. Sleek Command Bar with Asset Filters */}
+      <CommandFilterBar
+        onRunPreMarket={(prompt) => runPreMarket(prompt)}
+        isLoading={isLoading}
+        onOpenPasteModal={() => setIsPasteModalOpen(true)}
+        onPlaySquawk={handlePlaySquawk}
+        isPlayingAudio={isPlayingAudio}
+        onCopyBriefing={handleCopyBriefing}
+        isCopied={isCopied}
+        activeAssetFilter={activeAssetFilter}
+        onSelectAssetFilter={setActiveAssetFilter}
+        lastBriefingTime={briefing?.generatedAtCet}
+        isGrounded={briefing?.source === 'gemini_grounded'}
+      />
 
+      {/* Main Trading Floor Workspace */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 py-4 space-y-5">
+        {/* API Quota / Model Safeguard Notice (Non-blocking) */}
+        {briefing?.quotaNotice && (
+          <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs font-mono flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
-              <button
-                type="submit"
-                disabled={isLoading}
-                className={`px-6 py-3 rounded-xl font-mono text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer shadow-lg ${
-                  isLoading
-                    ? 'bg-amber-600/50 text-amber-200 cursor-not-allowed'
-                    : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20 active:scale-[0.98]'
-                }`}
-              >
-                {isLoading ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>COMPUTING G10...</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>RUN PRE-MARKET</span>
-                  </>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsModalOpen(true)}
-                title="Paste Raw Calendar / RSS Feed"
-                className="px-3.5 py-3 rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 font-mono text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <FileText className="w-4 h-4 text-amber-400" />
-                <span className="hidden sm:inline">PASTE CALENDAR</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handlePlaySquawk}
-                title="Institutional Squawk Box Audio"
-                className={`px-3.5 py-3 rounded-xl border font-mono text-xs flex items-center gap-1.5 transition-colors cursor-pointer ${
-                  isPlayingAudio
-                    ? 'bg-amber-500/20 border-amber-500 text-amber-300 animate-pulse'
-                    : 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-300'
-                }`}
-              >
-                <Volume2 className="w-4 h-4 text-amber-400" />
-                <span className="hidden sm:inline">{isPlayingAudio ? 'SQUAWKING...' : 'SQUAWK'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleCopyBriefing}
-                title="Copy Briefing"
-                className="px-3.5 py-3 rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-300 font-mono text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                {isCopied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                <span className="hidden sm:inline">{isCopied ? 'COPIED' : 'COPY'}</span>
-              </button>
+              <span className="w-2 h-2 rounded-full bg-amber-400" />
+              <span>{briefing.quotaNotice}</span>
             </div>
-          </form>
-
-          {/* Quick Preset Buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-slate-500 text-[11px] uppercase tracking-wider flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-amber-400" />
-                QUICK DESK COMMANDS:
-              </span>
-              {[
-                'RUN PRE-MARKET',
-                'FOMC RATE DECISION CHECK',
-                'ECB & SNB DANGER ZONES',
-                'G8 LIQUIDITY SWEEP CHECK',
-              ].map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  onClick={() => {
-                    setCommandInput(preset);
-                    runPreMarket(preset, true);
-                  }}
-                  disabled={isLoading}
-                  className="px-2.5 py-1 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-amber-300 text-[11px] transition-colors cursor-pointer"
-                >
-                  {preset}
-                </button>
-              ))}
-            </div>
-
-            {briefing?.generatedAtCet && (
-              <div className="text-[11px] text-slate-400 font-mono">
-                Briefing Generated: <span className="text-slate-200 font-bold">{briefing.generatedAtCet} CET</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Main Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-6 space-y-6">
-        {errorMessage && (
-          <div className="p-4 rounded-xl bg-red-950/60 border border-red-500/60 text-red-200 text-xs font-mono flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
-            <span>{errorMessage}</span>
+            <button
+              onClick={() => runPreMarket('RUN PRE-MARKET')}
+              className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-[10px] uppercase cursor-pointer"
+            >
+              Retry Live Search
+            </button>
           </div>
         )}
 
-        {/* Interactive TradingView Chart Widget for Selected Pair */}
-        <TradingViewWidget symbol={selectedPair} />
-
-        {/* View Filter Tabs */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-3 font-mono text-xs">
-          <div className="flex items-center gap-1.5 bg-[#080d16] p-1.5 rounded-xl border border-slate-800">
-            {[
-              { id: 'ALL', label: 'ALL 4 PARTS' },
-              { id: 'DANGER', label: '1. RED FOLDER DANGER ZONES' },
-              { id: 'STRENGTH', label: '2. G8 CURRENCY STRENGTH' },
-              { id: 'GAMEPLAN', label: '3. SESSION GAMEPLAN' },
-              { id: 'RISK', label: '4. RISK MODIFIER & SIZER' },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                  activeTab === tab.id
-                    ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+        {/* Error notification banner if briefing completely failed */}
+        {!briefing && errorMessage && (
+          <div className="p-3.5 rounded-xl bg-red-950/70 border border-red-500/60 text-red-200 text-xs font-mono flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+            <button
+              onClick={() => runPreMarket('RUN PRE-MARKET')}
+              className="px-3 py-1 rounded-lg bg-red-800 hover:bg-red-700 text-white font-bold text-[10px] uppercase cursor-pointer"
+            >
+              Retry
+            </button>
           </div>
+        )}
 
-          <div className="flex items-center gap-2 text-slate-400 text-xs font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span>REAL-TIME G8 ER-API FEED ACTIVE</span>
-          </div>
-        </div>
+        {/* Interactive TradingView Advanced Chart with 5 Asset Class Switcher */}
+        <TradingViewChart
+          currentSymbol={selectedSymbol}
+          currentTvSymbol={selectedTvSymbol}
+          currentAssetClass={selectedAssetClass}
+          onSelectPair={handleSelectAsset}
+        />
 
-        {/* Loading Skeleton */}
+        {/* Loading Indicator */}
         {isLoading && !briefing && (
-          <div className="p-16 text-center font-mono space-y-4">
+          <div className="p-12 text-center font-mono space-y-3">
             <RefreshCw className="w-8 h-8 text-amber-400 animate-spin mx-auto" />
-            <div className="text-sm font-bold text-slate-200">FETCHING LIVE G8 ER-API RATES & RUNNING MACRO ENGINE...</div>
+            <div className="text-sm font-bold text-slate-200">
+              SEARCHING LIVE WEB & COMPUTING MULTI-ASSET MACRO BRIEFING...
+            </div>
+            <p className="text-xs text-slate-400 max-w-md mx-auto">
+              Grounding ForexFactory, Investing.com, Binance live book, and central bank feeds into deterministic risk windows.
+            </p>
           </div>
         )}
 
-        {/* 4 Briefing Parts */}
+        {/* Briefing Sections */}
         {briefing && (
-          <div className="space-y-6">
-            {(activeTab === 'ALL' || activeTab === 'DANGER') && (
-              <Part1DangerZones
-                events={briefing.dangerZones.events}
-                summary={briefing.dangerZones.summary}
-                currentCetTime={currentCetTime}
-              />
-            )}
+          <div className="space-y-5">
+            {/* PART 1: RED FOLDER DANGER ZONES */}
+            <Part1DangerZones
+              events={briefing.dangerZones.events}
+              summary={briefing.dangerZones.summary}
+              currentCetTime={currentCetTime}
+              groundingSources={briefing.groundingSources}
+            />
 
-            {(activeTab === 'ALL' || activeTab === 'STRENGTH') && (
-              <Part2CurrencyStrength
-                currencies={briefing.currencies}
-                rateDifferentialNotes={briefing.rateDifferentialNotes}
-              />
-            )}
+            {/* PART 2: CROSS-ASSET STRENGTH MATRIX */}
+            <Part2CrossAssetStrength strengths={briefing.crossAssetStrength} />
 
-            {(activeTab === 'ALL' || activeTab === 'GAMEPLAN') && (
-              <Part3PairGameplans
-                pairGameplans={briefing.pairGameplans}
-                primaryStrategy={briefing.sessionGameplan.primaryStrategy}
-                onSelectPairForChart={(pair) => {
-                  setSelectedPair(pair);
-                  window.scrollTo({ top: 150, behavior: 'smooth' });
-                }}
-              />
-            )}
+            {/* PART 3: MULTI-ASSET SESSION GAMEPLANS */}
+            <Part3MultiAssetGameplans
+              gameplans={briefing.gameplans}
+              activeFilter={activeAssetFilter}
+              onSelectAsset={handleSelectAsset}
+              primaryRegime={briefing.sessionGameplan.primaryRegime}
+            />
 
-            {(activeTab === 'ALL' || activeTab === 'RISK') && (
-              <Part4RiskModifier
-                recommendation={briefing.riskModifier.recommendation}
-                isBombDay={briefing.riskModifier.isBombDay}
-                bombEventsFound={briefing.riskModifier.bombEventsFound}
-                riskRuleExplanation={briefing.riskModifier.riskRuleExplanation}
-                recommendedRiskPerTradePct={briefing.riskModifier.recommendedRiskPerTradePct}
-                rates={rates}
-                selectedPair={selectedPair}
-              />
-            )}
+            {/* PART 4: DYNAMIC RISK MODIFIER & MULTI-ASSET POSITION SIZER */}
+            <Part4MultiAssetSizer
+              recommendation={briefing.riskModifier.recommendation}
+              riskPct={allowedRiskPct}
+              isBombDay={briefing.riskModifier.isBombDay}
+              bombEventsFound={briefing.riskModifier.bombEventsFound}
+              riskRuleExplanation={briefing.riskModifier.riskRuleExplanation}
+              portfolio={portfolio}
+              selectedSymbol={selectedSymbol}
+              selectedAssetClass={selectedAssetClass}
+              currentEstimatedPrice={estimatedPrice}
+            />
 
-            {briefing.keyHeadlines && briefing.keyHeadlines.length > 0 && (
-              <HeadlinesBar headlines={briefing.keyHeadlines} />
-            )}
+            {/* Verified Live Web Sources Citations */}
+            <GroundingSourcesBar sources={briefing.groundingSources} />
           </div>
         )}
       </main>
 
-      {/* Paste Calendar Modal */}
+      {/* Connect Binance Read-Only API Modal */}
+      <BinanceModal
+        isOpen={isBinanceModalOpen}
+        onClose={() => setIsBinanceModalOpen(false)}
+        portfolio={portfolio}
+        onSaveCredentials={handleSaveBinanceCredentials}
+        onDisconnect={handleDisconnectBinance}
+        isLoading={false}
+        onLoadDemoPortfolio={handleLoadDemoPortfolio}
+      />
+
+      {/* Paste Raw Calendar Modal */}
       <MacroInputModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onSubmitPrompt={(promptText) => {
-          setCommandInput(promptText);
-          runPreMarket(promptText, true);
+        isOpen={isPasteModalOpen}
+        onClose={() => setIsPasteModalOpen(false)}
+        onSubmitPrompt={(rawCalendar) => {
+          runPreMarket(undefined, rawCalendar);
         }}
       />
 
       {/* Footer */}
-      <footer className="border-t border-slate-800/80 bg-[#04060b] py-4 text-center font-mono text-[11px] text-slate-500">
+      <footer className="border-t border-slate-800/80 bg-[#03050a] py-3 text-center font-mono text-[10px] text-slate-500">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div>G10 FOREX MACRO & RISK DESK • LIVE ER-API G8 SPOT FEED • TRADINGVIEW EMBEDDED</div>
-          <div className="text-slate-400">Institutional Execution & Risk Discipline • EUR/USD, GBP/USD, USD/JPY & G10</div>
+          <div>
+            INSTITUTIONAL MULTI-ASSET MACRO & RISK DESK • LIVE BINANCE WS & SPOT ER-API • TRADINGVIEW EMBEDDED
+          </div>
+          <div className="text-slate-400">
+            Zero Simulation • Read-Only HMAC-SHA256 Security • ±30m Deterministic CET Windows
+          </div>
         </div>
       </footer>
     </div>

@@ -1,89 +1,15 @@
-/**
- * Institutional G10 Forex Macro & Risk Desk Rules & Calculators
- */
-
-export interface EconomicEvent {
-  id: string;
-  timeCet: string; // "HH:MM", e.g. "14:30"
-  currency: 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF' | 'AUD' | 'CAD' | 'NZD';
-  event: string;
-  impact: 'HIGH' | 'MEDIUM' | 'LOW';
-  forecast?: string;
-  previous?: string;
-  actual?: string;
-  noTradeWindowStart: string; // "HH:MM" (30 min before)
-  noTradeWindowEnd: string;   // "HH:MM" (30 min after)
-}
-
-export type DirectionRating = 'Bullish' | 'Bearish' | 'Neutral';
-export type GameplanStrategy = 'Trend Breakouts' | 'Mean-Reversion Range Sweeps' | 'Stop-Hunt Reversals';
-export type RiskModifierType = 'Standard 1.0% Risk' | 'Half 0.5% Risk' | '0% SIT ON HANDS';
-
-export interface CurrencyStrength {
-  currency: 'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF' | 'AUD' | 'CAD' | 'NZD';
-  score: number; // -5 to +5
-  rating: DirectionRating;
-  rate: string;
-  rationale: string;
-}
-
-export interface PairGameplan {
-  pair: string; // e.g. EUR/USD
-  strategy: GameplanStrategy;
-  bias: 'Long' | 'Short' | 'Neutral / Stand Aside';
-  keySupport: string;
-  keyResistance: string;
-  playbook: string;
-}
-
-export interface MacroBriefing {
-  timestamp: string;
-  generatedAtCet: string;
-  source: 'live_web' | 'live_api' | 'desk_model';
-  // 1. RED FOLDER DANGER ZONES
-  dangerZones: {
-    events: EconomicEvent[];
-    activeBlackout: boolean;
-    activeEventTitle?: string;
-    summary: string;
-  };
-  // 2. G8 DIRECTIONAL BIAS & STRENGTH
-  currencies: Record<'USD' | 'EUR' | 'GBP' | 'JPY' | 'CHF' | 'AUD' | 'CAD' | 'NZD', CurrencyStrength>;
-  pairGameplans: Record<string, PairGameplan>;
-  rateDifferentialNotes: string;
-  // 3. SESSION GAMEPLAN OVERVIEW
-  sessionGameplan: {
-    primaryStrategy: GameplanStrategy;
-    confidence: 'HIGH' | 'MODERATE' | 'LOW';
-    executionPlaybook: string;
-    londonKillzoneFocus: string;
-    nyOverlapFocus: string;
-    invalidationTrigger: string;
-  };
-  // 4. RISK MODIFIER
-  riskModifier: {
-    recommendation: RiskModifierType;
-    isBombDay: boolean;
-    bombEventsFound: string[];
-    riskRuleExplanation: string;
-    recommendedMaxPositions: number;
-    recommendedRiskPerTradePct: number;
-  };
-  marketSnapshot: {
-    rates: Record<string, number>; // Live rates fetched from ER-API
-    timestamp: string;
-  };
-  keyHeadlines: {
-    headline: string;
-    source: string;
-    impact: string;
-  }[];
-}
+import {
+  EconomicEvent,
+  RiskModifierType,
+  AssetClass,
+  MultiAssetPositionResult,
+} from '../types/terminal';
 
 /**
  * Parses "HH:MM" into total minutes from midnight (0..1439).
  */
 export function parseCetMinutes(timeStr: string): number {
+  if (!timeStr) return 0;
   const parts = timeStr.trim().split(':');
   if (parts.length < 2) return 0;
   const hours = parseInt(parts[0], 10) || 0;
@@ -102,12 +28,12 @@ export function formatMinutesToCet(totalMinutes: number): string {
 }
 
 /**
- * Calculates the mandatory "No-Trade Window" (30 mins before to 30 mins after).
+ * Computes deterministic ±30 min No-Trade Window for any given release time in CET.
  */
-export function calculateNoTradeWindow(eventTimeCet: string): { windowStart: string; windowEnd: string } {
-  const eventMinutes = parseCetMinutes(eventTimeCet);
-  const startMinutes = eventMinutes - 30;
-  const endMinutes = eventMinutes + 30;
+export function computeNoTradeWindow(timeCet: string, bufferMinutes = 30): { windowStart: string; windowEnd: string } {
+  const eventMinutes = parseCetMinutes(timeCet);
+  const startMinutes = eventMinutes - bufferMinutes;
+  const endMinutes = eventMinutes + bufferMinutes;
   return {
     windowStart: formatMinutesToCet(startMinutes),
     windowEnd: formatMinutesToCet(endMinutes),
@@ -115,7 +41,7 @@ export function calculateNoTradeWindow(eventTimeCet: string): { windowStart: str
 }
 
 /**
- * Checks whether current CET time is inside blackout window.
+ * Checks whether current CET time is inside the blackout window.
  */
 export function isInsideNoTradeWindow(currentCet: string, windowStart: string, windowEnd: string): boolean {
   const cur = parseCetMinutes(currentCet);
@@ -129,108 +55,141 @@ export function isInsideNoTradeWindow(currentCet: string, windowStart: string, w
 }
 
 /**
- * Strict Risk Modifier Evaluator for G8 Desk
- * CPI, NFP, or Central Bank Rate Decisions mandate "0% SIT ON HANDS" or "Half 0.5% Risk".
+ * Institutional Multi-Asset Risk Modifier Engine
+ * Rules:
+ * - CPI, NFP, or FOMC Rate Decisions: '0% SIT ON HANDS' or 'Quarter 0.25% Risk'
+ * - High-Impact Red Folders (GDP, Retail Sales, Flash PMIs): 'Half 0.5% Risk'
+ * - Clean Docket: 'Standard 1.0% Risk'
  */
 export function determineRiskModifier(events: EconomicEvent[]): {
   recommendation: RiskModifierType;
+  riskPct: number;
   isBombDay: boolean;
   bombEventsFound: string[];
   explanation: string;
-  riskPct: number;
 } {
-  const bombKeywords = ['CPI', 'NFP', 'NON-FARM', 'FOMC', 'RATE DECISION', 'RATE STATEMENT', 'ECB RATE', 'BOE RATE', 'BOJ RATE', 'RBA RATE'];
+  const bombKeywords = ['CPI', 'NFP', 'NON-FARM', 'FOMC', 'FED RATE', 'ECB RATE', 'INTEREST RATE', 'POWELL'];
   const bombEvents: string[] = [];
+  const highImpactEvents: string[] = [];
 
   for (const ev of events) {
     if (ev.impact === 'HIGH') {
-      const upper = ev.event.toUpperCase();
-      const match = bombKeywords.some(kw => upper.includes(kw));
+      const upper = (ev.event || '').toUpperCase();
+      const match = bombKeywords.some((kw) => upper.includes(kw));
       if (match) {
         bombEvents.push(`${ev.currency} ${ev.event} (${ev.timeCet} CET)`);
+      } else {
+        highImpactEvents.push(`${ev.currency} ${ev.event} (${ev.timeCet} CET)`);
       }
     }
   }
 
   if (bombEvents.length > 0) {
-    const isRateDecision = bombEvents.some(b => b.includes('RATE') || b.includes('FOMC'));
-    if (isRateDecision) {
+    const isMajorRateOrCPI = bombEvents.some((b) => b.includes('CPI') || b.includes('FOMC') || b.includes('NFP') || b.includes('RATE'));
+    if (isMajorRateOrCPI) {
       return {
         recommendation: '0% SIT ON HANDS',
+        riskPct: 0.0,
         isBombDay: true,
         bombEventsFound: bombEvents,
-        explanation: `Institutional Red Alert: Central Bank Rate Decision / Tier-1 Volatility Bomb detected (${bombEvents.join(', ')}). Desk protocol mandates flat book (0% risk) during rate announcement and press conference.`,
-        riskPct: 0.0,
+        explanation: `Institutional Volatility Bomb Detected: ${bombEvents.join(', ')}. Strict desk protocol mandates a flat book (0% risk) during the release window and press conferences due to severe slippage and spread widening.`,
       };
     }
     return {
-      recommendation: 'Half 0.5% Risk',
+      recommendation: 'Quarter 0.25% Risk',
+      riskPct: 0.25,
       isBombDay: true,
       bombEventsFound: bombEvents,
-      explanation: `Tier-1 economic release detected (${bombEvents.join(', ')}). Capital preservation protocol engaged: risk restricted to 0.5% max per setup.`,
-      riskPct: 0.5,
+      explanation: `Tier-1 event cluster (${bombEvents.join(', ')}). Capital preservation protocol restricts maximum position risk to 0.25% equity.`,
     };
   }
 
-  const highImpactCount = events.filter(e => e.impact === 'HIGH').length;
-  if (highImpactCount >= 3) {
+  if (highImpactEvents.length >= 2) {
     return {
       recommendation: 'Half 0.5% Risk',
-      isBombDay: true,
-      bombEventsFound: events.filter(e => e.impact === 'HIGH').map(e => `${e.currency} ${e.event}`),
-      explanation: `Multiple High-Impact red folders scheduled today (${highImpactCount} releases). Desk mandates defense: Half 0.5% Risk per trade.`,
       riskPct: 0.5,
+      isBombDay: true,
+      bombEventsFound: highImpactEvents,
+      explanation: `Multiple High-Impact red folders scheduled today (${highImpactEvents.length} releases). Risk ceiling capped at 0.5% per trade.`,
     };
   }
 
   return {
     recommendation: 'Standard 1.0% Risk',
+    riskPct: 1.0,
     isBombDay: false,
     bombEventsFound: [],
-    explanation: 'Clean economic docket today with no Tier-1 rate decisions or CPI bombs. Standard G10 desk parameters of 1.0% equity allocation per setup apply outside scheduled No-Trade Windows.',
-    riskPct: 1.0,
+    explanation: 'Clean economic docket today with no Tier-1 rate shocks or CPI bombs. Standard institutional 1.0% equity allocation authorized for qualified setups.',
   };
 }
 
 /**
- * G8 Position Size Calculator
+ * Multi-Asset Position Sizer
+ * Accurately sizes Crypto (Binance leverage), Forex (pips & lots), Commodities (Gold Oz), Indices, and Stocks.
  */
-export function calculatePositionSize(params: {
+export function calculateMultiAssetPositionSize(params: {
+  assetClass: AssetClass;
   accountBalance: number;
   riskPct: number;
-  stopLossPips: number;
-  pair: string;
-  currentRate: number;
-}): {
-  riskAmountUsd: number;
-  lotSize: number;
-  units: number;
-  pipValueUsd: number;
-} {
-  const { accountBalance, riskPct, stopLossPips, pair, currentRate } = params;
-  if (accountBalance <= 0 || riskPct <= 0 || stopLossPips <= 0 || currentRate <= 0) {
-    return { riskAmountUsd: 0, lotSize: 0, units: 0, pipValueUsd: 0 };
+  entryPrice: number;
+  stopLossPrice: number;
+  maxLeverage?: number;
+}): MultiAssetPositionResult {
+  const { assetClass, accountBalance, riskPct, entryPrice, stopLossPrice, maxLeverage = 10 } = params;
+
+  if (accountBalance <= 0 || riskPct <= 0 || entryPrice <= 0 || stopLossPrice <= 0 || entryPrice === stopLossPrice) {
+    return {
+      assetClass,
+      riskAmountUsd: 0,
+      entryPrice,
+      stopLossPrice,
+      stopLossDistance: 0,
+      stopLossPct: 0,
+      positionSizeBase: 0,
+      positionSizeNotionalUsd: 0,
+      effectiveLeverage: 0,
+    };
   }
 
   const riskAmountUsd = accountBalance * (riskPct / 100);
-  
-  // Standard pip value calculation for G8 pairs with USD quote vs USD base
-  let pipValuePerStandardLot = 10; // $10 per pip for EURUSD, GBPUSD, AUDUSD, NZDUSD
-  if (pair.includes('JPY')) {
-    pipValuePerStandardLot = (100000 * 0.01) / currentRate; // approx $6.5 to $7 depending on USDJPY rate
-  } else if (pair.startsWith('USD') && !pair.endsWith('USD')) {
-    pipValuePerStandardLot = 10 / currentRate;
-  }
+  const stopLossDistance = Math.abs(entryPrice - stopLossPrice);
+  const stopLossPct = (stopLossDistance / entryPrice) * 100;
+  const isLong = entryPrice > stopLossPrice;
 
-  const rawLots = riskAmountUsd / (stopLossPips * pipValuePerStandardLot);
-  const lotSize = Math.max(0.01, Math.floor(rawLots * 100) / 100);
-  const units = Math.round(lotSize * 100000);
-  const pipValueUsd = Math.round(lotSize * pipValuePerStandardLot * 100) / 100;
+  // Base position sizing: Risk / SL%
+  const notionalPositionUsd = riskAmountUsd / (stopLossDistance / entryPrice);
+  const positionSizeBase = notionalPositionUsd / entryPrice;
+  const effectiveLeverage = Math.min(125, Math.round((notionalPositionUsd / accountBalance) * 10) / 10);
+
+  // Liquidation estimate for Crypto
+  const liqBufferPct = (1 / Math.max(1, effectiveLeverage)) * 0.9;
+  const liquidationPriceEst = isLong
+    ? Math.max(0, entryPrice * (1 - liqBufferPct))
+    : entryPrice * (1 + liqBufferPct);
+
+  // Forex standard lot conversion (assuming standard 100,000 unit contract, 1 pip = 0.0001 or 0.01 for JPY)
+  const isJpy = entryPrice > 50 && entryPrice < 300;
+  const pipScale = isJpy ? 0.01 : 0.0001;
+  const stopLossPips = stopLossDistance / pipScale;
+  const standardLots = Math.max(0.01, Math.round((riskAmountUsd / (Math.max(1, stopLossPips) * 10)) * 100) / 100);
+  const pipValueUsd = standardLots * 10;
+
+  // Indices / Commodities contracts
+  const contracts = Math.max(0.01, Math.round((riskAmountUsd / Math.max(0.01, stopLossDistance)) * 100) / 100);
 
   return {
+    assetClass,
     riskAmountUsd: Math.round(riskAmountUsd * 100) / 100,
-    lotSize,
-    units,
+    entryPrice,
+    stopLossPrice,
+    stopLossDistance: Math.round(stopLossDistance * 10000) / 10000,
+    stopLossPct: Math.round(stopLossPct * 100) / 100,
+    positionSizeBase: Math.round(positionSizeBase * 10000) / 10000,
+    positionSizeNotionalUsd: Math.round(notionalPositionUsd * 100) / 100,
+    effectiveLeverage,
+    liquidationPriceEst: Math.round(liquidationPriceEst * 100) / 100,
+    standardLots,
+    contracts,
     pipValueUsd,
   };
 }
